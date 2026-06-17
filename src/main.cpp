@@ -51,6 +51,7 @@ lv_obj_t * status_label;
 
 // --- Data Variables ---
 int currentRpm = 0;
+float smoothedRpm = 0.0f;
 float currentBat = 0.0;
 int currentCoolantTemp = 0;
 int currentLoad = 0;
@@ -184,43 +185,73 @@ void buildUI() {
 
 void updateUI() {
   char buf[32];
+  
+  static int lastDispRpm = -999;
+  static float lastDispAvgKml = -999.0f;
+  static float lastDispBat = -999.0f;
+  static int lastDispCoolant = -999;
+  static int lastDispIat = -999;
+  static int lastDispLoad = -999;
+  static float lastDispBoost = -999.0f;
 
-  // 1. Shift Lights
+  int rpmToUse = (int)smoothedRpm;
+
+  // 1. Shift Lights (updated every frame for smooth progression and flash flashing logic)
   int shift_start = 1800, shift_end = 3500; 
   float step = (float)(shift_end - shift_start) / 10.0;
   for(int i = 0; i < 10; i++) {
     int threshold = shift_start + (i * step);
-    if (currentRpm >= threshold) lv_led_on(shift_leds[i]);
+    if (rpmToUse >= threshold) lv_led_on(shift_leds[i]);
     else lv_led_off(shift_leds[i]);
   }
-  if (currentRpm >= shift_end && (millis() / 100) % 2 == 0) {
+  if (rpmToUse >= shift_end && (millis() / 100) % 2 == 0) {
     for(int i=7; i<10; i++) lv_led_off(shift_leds[i]);
   }
 
-  // 2. Labels
-  sprintf(buf, "%d", currentRpm);
-  lv_label_set_text(rpm_val_label, buf);
+  // 2. Labels (only update when values actually change to save CPU cycles)
+  if (rpmToUse != lastDispRpm) {
+    lastDispRpm = rpmToUse;
+    sprintf(buf, "%d", rpmToUse);
+    lv_label_set_text(rpm_val_label, buf);
+  }
 
-  if (currentAvgKml > 0.0) sprintf(buf, "%.1f", currentAvgKml);
-  else sprintf(buf, "--");
-  lv_label_set_text(avg_kml_label, buf);
+  if (fabs(currentAvgKml - lastDispAvgKml) > 0.05f) {
+    lastDispAvgKml = currentAvgKml;
+    if (currentAvgKml > 0.0) sprintf(buf, "%.1f", currentAvgKml);
+    else sprintf(buf, "--");
+    lv_label_set_text(avg_kml_label, buf);
+  }
 
-  sprintf(buf, "%.1f", currentBat);
-  lv_label_set_text(bat_val_label, buf);
+  if (fabs(currentBat - lastDispBat) > 0.05f) {
+    lastDispBat = currentBat;
+    sprintf(buf, "%.1f", currentBat);
+    lv_label_set_text(bat_val_label, buf);
+  }
 
-  sprintf(buf, "%d", currentCoolantTemp);
-  lv_label_set_text(coolant_val_label, buf);
+  if (currentCoolantTemp != lastDispCoolant) {
+    lastDispCoolant = currentCoolantTemp;
+    sprintf(buf, "%d", currentCoolantTemp);
+    lv_label_set_text(coolant_val_label, buf);
+  }
 
-  sprintf(buf, "%d", currentIat);
-  lv_label_set_text(iat_val_label, buf);
+  if (currentIat != lastDispIat) {
+    lastDispIat = currentIat;
+    sprintf(buf, "%d", currentIat);
+    lv_label_set_text(iat_val_label, buf);
+  }
 
-  sprintf(buf, "%d", currentLoad);
-  lv_label_set_text(load_val_label, buf);
+  if (currentLoad != lastDispLoad) {
+    lastDispLoad = currentLoad;
+    sprintf(buf, "%d", currentLoad);
+    lv_label_set_text(load_val_label, buf);
+    lv_bar_set_value(load_bar, currentLoad, LV_ANIM_ON);
+  }
 
-  sprintf(buf, "%.2f", currentBoost);
-  lv_label_set_text(boost_val_label, buf);
-
-  lv_bar_set_value(load_bar, currentLoad, LV_ANIM_ON);
+  if (fabs(currentBoost - lastDispBoost) > 0.01f) {
+    lastDispBoost = currentBoost;
+    sprintf(buf, "%.2f", currentBoost);
+    lv_label_set_text(boost_val_label, buf);
+  }
 }
 
 void updateBTStatus() {
@@ -389,6 +420,25 @@ void loop() {
     return;
   }
 
+  // Decoupled UI update timer (every 30ms / ~33 FPS)
+  static unsigned long lastUiUpdate = 0;
+  if (now - lastUiUpdate >= 30) {
+    unsigned long dt = now - lastUiUpdate;
+    lastUiUpdate = now;
+
+    // Smooth RPM (Time constant = 80ms for fast response, but filters 100ms OBD intervals)
+    float alpha = 1.0f - expf(-(float)dt / 80.0f);
+    if (alpha > 1.0f) alpha = 1.0f;
+    if (alpha < 0.0f) alpha = 0.0f;
+
+    smoothedRpm = smoothedRpm + ((float)currentRpm - smoothedRpm) * alpha;
+    if (fabsf(smoothedRpm - (float)currentRpm) < 2.0f) {
+      smoothedRpm = (float)currentRpm;
+    }
+
+    updateUI();
+  }
+
   if (now - lastElmUpdate > elmInterval) {
     lastElmUpdate = now;
 
@@ -491,7 +541,5 @@ void loop() {
       lastCalcTime = 0; 
       currentBoost = 0.0;
     }
-
-    updateUI();
   }
 }

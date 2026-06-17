@@ -391,87 +391,77 @@ void loop() {
 
   if (now - lastElmUpdate > elmInterval) {
     lastElmUpdate = now;
-    
-    // Prioritized polling scheduling slots (length 8)
-    // Slots 0, 2, 4, 6: RPM (50%)
-    // Slots 1, 5: MAP/Boost (25%)
-    // Slot 3: Engine Load (12.5%)
-    // Slot 7: Slow PIDs (Coolant/IAT/Battery) or KPH (12.5%)
-    static int scheduleIndex = 0;
-    int currentSlotType = 0; // 0=RPM, 1=MAP, 2=Load, 3=KPH, 4=Coolant, 5=IAT, 6=Battery
 
-    switch(scheduleIndex) {
-      case 0: case 2: case 4: case 6:
-        currentSlotType = 0; // RPM
-        break;
-      case 1: case 5:
-        currentSlotType = 1; // MAP
-        break;
-      case 3:
-        currentSlotType = 2; // Load
-        break;
-      case 7: {
-        if (now - lastCoolantQuery >= 5000) {
-          currentSlotType = 4; // Coolant
-        } else if (now - lastIatQuery >= 5000) {
-          currentSlotType = 5; // IAT
-        } else if (now - lastBatQuery >= 5000) {
-          currentSlotType = 6; // Battery
-        } else {
-          currentSlotType = 3; // KPH
-        }
-        break;
-      }
-    }
+    // Flat 32-slot schedule - explicit and starvation-proof.
+    // PID codes: 0=RPM, 1=MAP, 2=Load, 3=KPH, 4=Coolant, 5=IAT, 6=Battery
+    // RPM gets 16/32 (50%), MAP gets 8/32 (25%), Load 4/32 (12.5%),
+    // Coolant/IAT/Battery/KPH each get 1/32 (~3%). Every PID guaranteed a turn.
+    static const int SCHED[] = {
+      0, 1, 0, 2,   // RPM, MAP, RPM, Load
+      0, 1, 0, 4,   // RPM, MAP, RPM, Coolant
+      0, 1, 0, 2,   // RPM, MAP, RPM, Load
+      0, 1, 0, 5,   // RPM, MAP, RPM, IAT
+      0, 1, 0, 2,   // RPM, MAP, RPM, Load
+      0, 1, 0, 6,   // RPM, MAP, RPM, Battery
+      0, 1, 0, 2,   // RPM, MAP, RPM, Load
+      0, 1, 0, 3    // RPM, MAP, RPM, KPH
+    };
+    static const int SCHED_LEN = 32;
+    static int scheduleIndex = 0;
 
     bool advancedSlot = false;
-    switch(currentSlotType) {
-      case 0: {
+    switch(SCHED[scheduleIndex]) {
+      case 0: { // RPM
         float val = myELM327.rpm();
         if (myELM327.nb_rx_state == ELM_SUCCESS) { currentRpm = (int)val; advancedSlot = true; }
         else if (myELM327.nb_rx_state != ELM_GETTING_MSG) advancedSlot = true;
         break;
       }
-      case 1: {
+      case 1: { // MAP
         float val = myELM327.manifoldPressure();
         if (myELM327.nb_rx_state == ELM_SUCCESS) { currentMap = (int)val; advancedSlot = true; }
         else if (myELM327.nb_rx_state != ELM_GETTING_MSG) advancedSlot = true;
         break;
       }
-      case 2: {
+      case 2: { // Load
         float val = myELM327.engineLoad();
         if (myELM327.nb_rx_state == ELM_SUCCESS) { currentLoad = (int)val; advancedSlot = true; }
         else if (myELM327.nb_rx_state != ELM_GETTING_MSG) advancedSlot = true;
         break;
       }
-      case 3: {
+      case 3: { // KPH
         float val = myELM327.kph();
         if (myELM327.nb_rx_state == ELM_SUCCESS) { currentKph = (int)val; advancedSlot = true; }
         else if (myELM327.nb_rx_state != ELM_GETTING_MSG) advancedSlot = true;
         break;
       }
-      case 4: {
+      case 4: { // Coolant
         float val = myELM327.engineCoolantTemp();
-        if (myELM327.nb_rx_state == ELM_SUCCESS) { currentCoolantTemp = (int)val; lastCoolantQuery = now; advancedSlot = true; }
-        else if (myELM327.nb_rx_state != ELM_GETTING_MSG) { lastCoolantQuery = now; advancedSlot = true; }
+        if (myELM327.nb_rx_state == ELM_SUCCESS) { currentCoolantTemp = (int)val; advancedSlot = true; }
+        else if (myELM327.nb_rx_state != ELM_GETTING_MSG) advancedSlot = true;
         break;
       }
-      case 5: {
+      case 5: { // IAT
         float val = myELM327.intakeAirTemp();
-        if (myELM327.nb_rx_state == ELM_SUCCESS) { currentIat = (int)val; lastIatQuery = now; advancedSlot = true; }
-        else if (myELM327.nb_rx_state != ELM_GETTING_MSG) { lastIatQuery = now; advancedSlot = true; }
+        if (myELM327.nb_rx_state == ELM_SUCCESS) { currentIat = (int)val; advancedSlot = true; }
+        else if (myELM327.nb_rx_state != ELM_GETTING_MSG) advancedSlot = true;
         break;
       }
-      case 6: {
+      case 6: { // Battery
         float val = myELM327.batteryVoltage();
-        if (myELM327.nb_rx_state == ELM_SUCCESS) { currentBat = val; lastBatQuery = now; advancedSlot = true; }
-        else if (myELM327.nb_rx_state != ELM_GETTING_MSG) { lastBatQuery = now; advancedSlot = true; }
+        if (myELM327.nb_rx_state == ELM_SUCCESS) {
+          Serial.printf("[BAT] SUCCESS val=%.2f\n", val);
+          currentBat = val; advancedSlot = true;
+        } else if (myELM327.nb_rx_state != ELM_GETTING_MSG) {
+          Serial.printf("[BAT] FAIL state=%d\n", myELM327.nb_rx_state);
+          advancedSlot = true;
+        }
         break;
       }
     }
 
     if (advancedSlot) {
-      scheduleIndex = (scheduleIndex + 1) % 8;
+      scheduleIndex = (scheduleIndex + 1) % SCHED_LEN;
     }
 
     // --- Diesel Fuel & Boost Calculations ---
